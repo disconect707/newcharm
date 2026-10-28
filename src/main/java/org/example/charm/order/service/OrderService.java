@@ -1,6 +1,8 @@
 package org.example.charm.order.service;
 
 import lombok.RequiredArgsConstructor;
+import org.example.charm.common.exception.InsufficientVolumeException;
+import org.example.charm.common.exception.ResourceNotFoundException;
 import org.example.charm.order.dto.OrderItemResponse;
 import org.example.charm.order.dto.OrderResponse;
 import org.example.charm.order.entity.*;
@@ -32,13 +34,13 @@ public class OrderService {
     @Transactional
     public OrderResponse createOrderFromCart(Long userId) {
         User user = userRepository.findById(userId)
-                .orElseThrow(() -> new RuntimeException("Пользователь не найден"));
+                .orElseThrow(() -> new ResourceNotFoundException("Пользователь не найден"));
 
         Cart cart = cartRepository.findByUserId(userId)
-                .orElseThrow(() -> new RuntimeException("Корзина не найдена"));
+                .orElseThrow(() -> new ResourceNotFoundException("Корзина не найдена"));
 
         if (cart.getItems().isEmpty()) {
-            throw new RuntimeException("Корзина пуста");
+            throw new InsufficientVolumeException("Корзина пуста");
         }
 
         Order order = Order.builder()
@@ -51,25 +53,27 @@ public class OrderService {
         BigDecimal totalAmount = BigDecimal.ZERO;
 
         for (CartItem cartItem : cart.getItems()) {
-            Product product = cartItem.getProduct();
+
+            // ВАЖНО: Достаем продукт с пессимистичной блокировкой!
+            Product product = productRepository.findByIdForUpdate(cartItem.getProduct().getId())
+                    .orElseThrow(() -> new ResourceNotFoundException("Товар не найден"));
+
             int requiredVolumeForThisItem = cartItem.getVolumeMl() * cartItem.getQuantity();
 
-            // ЖЕСТКАЯ ПРОВЕРКА ОСТАТКА: Если пока товар лежал в корзине, его раскупили
             if (product.getLeftoverVolumeMl() < requiredVolumeForThisItem) {
-                throw new RuntimeException("К сожалению, парфюм " + product.getName()
+                // Используем нашу новую кастомную ошибку
+                throw new InsufficientVolumeException("К сожалению, парфюм " + product.getName()
                         + " в объеме " + requiredVolumeForThisItem + " мл уже закончился. "
                         + "Доступно: " + product.getLeftoverVolumeMl() + " мл.");
             }
 
-            // Атомарно уменьшаем остаток во флаконе
             product.setLeftoverVolumeMl(product.getLeftoverVolumeMl() - requiredVolumeForThisItem);
-            productRepository.save(product); // Hibernate зафиксирует update при коммите транзакции
+            productRepository.save(product);
 
-            // Находим актуальную цену за выбранный объем
             ProductVolumePrice priceRule = product.getVolumePrices().stream()
                     .filter(pvp -> pvp.getVolumeMl().equals(cartItem.getVolumeMl()))
                     .findFirst()
-                    .orElseThrow(() -> new RuntimeException("Цена для объема " + cartItem.getVolumeMl() + " не найдена"));
+                    .orElseThrow(() -> new ResourceNotFoundException("Цена не найдена"));
 
             BigDecimal itemTotalPrice = priceRule.getPrice().multiply(BigDecimal.valueOf(cartItem.getQuantity()));
             totalAmount = totalAmount.add(itemTotalPrice);
@@ -79,18 +83,14 @@ public class OrderService {
                     .product(product)
                     .volumeMl(cartItem.getVolumeMl())
                     .quantity(cartItem.getQuantity())
-                    .price(priceRule.getPrice()) // фиксируем цену на момент покупки!
+                    .price(priceRule.getPrice())
                     .build();
 
             order.getItems().add(orderItem);
         }
 
         order.setTotalAmount(totalAmount);
-
-        // Сохраняем заказ в БД. Если что-то упадет, вся транзакция откатится, миллилитры вернутся.
         Order savedOrder = orderRepository.save(order);
-
-        // Очищаем корзину после успешного оформления
         cartService.clearCart(userId);
 
         return mapToResponse(savedOrder);

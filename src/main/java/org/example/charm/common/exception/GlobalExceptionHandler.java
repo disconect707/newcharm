@@ -12,16 +12,32 @@ import java.util.Map;
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
-    // Ловим наши бизнес-ошибки (например, если закончились миллилитры)
-    // и возвращаем статус 400 Bad Request вместо 500 Internal Server Error
-    @ExceptionHandler(RuntimeException.class)
-    public ResponseEntity<Object> handleRuntimeException(RuntimeException ex) {
+    // Ловим только ошибку нехватки миллилитров (400 Bad Request)
+    @ExceptionHandler(InsufficientVolumeException.class)
+    public ResponseEntity<Object> handleInsufficientVolume(InsufficientVolumeException ex) {
+        return buildErrorResponse(ex, HttpStatus.BAD_REQUEST);
+    }
+
+    // Ловим ошибку, если товар или юзер не найден (404 Not Found)
+    @ExceptionHandler(ResourceNotFoundException.class)
+    public ResponseEntity<Object> handleResourceNotFound(ResourceNotFoundException ex) {
+        return buildErrorResponse(ex, HttpStatus.NOT_FOUND);
+    }
+
+    // Все остальные непредвиденные ошибки (NullPointerException, отвал БД и т.д.)
+    // честно отдают 500 Internal Server Error
+    @ExceptionHandler(Exception.class)
+    public ResponseEntity<Object> handleGeneralException(Exception ex) {
+        return buildErrorResponse(ex, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+
+    private ResponseEntity<Object> buildErrorResponse(Exception ex, HttpStatus status) {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("timestamp", LocalDateTime.now());
-        body.put("status", HttpStatus.BAD_REQUEST.value());
-        body.put("error", "Bad Request");
+        body.put("status", status.value());
+        body.put("error", status.getReasonPhrase());
         body.put("message", ex.getMessage());
 
-        return new ResponseEntity<>(body, HttpStatus.BAD_REQUEST);
+        return new ResponseEntity<>(body, status);
     }
 }
